@@ -1,0 +1,6 @@
+github.com/D4ario0/go-qrcode v0.0.0-20251101170430-16c818244360 h1:4pJXN4N+jlZLQ+2KOT1JEuJMtsl2zdziL169OOjf6FU=
+github.com/D4ario0/go-qrcode v0.0.0-20251101170430-16c818244360/go.mod h1:1D9jDeHRfb8IkCm35SJdaSneqTzaulsXdXCuvuW8cSc=
+golang.org/x/image v0.36.0 h1:Iknbfm1afbgtwPTmHnS2gTM/6PPZfH+z2EFuOkSbqwc=
+golang.org/x/image v0.36.0/go.mod h1:YsWD2TyyGKiIX1kZlu9QfKIsQ4nAAK9bdgdrIsE7xy4=
+golang.org/x/text v0.34.0 h1:oL/Qq0Kdaqxa1KbNeMKwQq0reLCCaFtqu2eNuSeNHbk=
+golang.org/x/text v0.34.0/go.mod h1:homfLqTYRFyVYemLBFl5GgL/DWEiH5wcsQ5gSh1yziA=
