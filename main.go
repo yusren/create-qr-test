@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -8,6 +9,8 @@ import (
 	"image/png"
 	"log"
 	"os"
+	"path/filepath"
+	"sync"
 
 	"github.com/D4ario0/go-qrcode"
 	xdraw "golang.org/x/image/draw"
@@ -16,6 +19,41 @@ import (
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/math/fixed"
 )
+
+// Cache font untuk menghindari parsing berulang kali
+var (
+	fontOnce sync.Once
+	fontFace *opentype.Font
+	fontErr  error
+)
+
+// getCachedFont mengembalikan font yang sudah di-parse (singleton pattern)
+func getCachedFont() (*opentype.Font, error) {
+	fontOnce.Do(func() {
+		fontFace, fontErr = opentype.Parse(goregular.TTF)
+	})
+	return fontFace, fontErr
+}
+
+// validateSafePath memastikan path tidak mengandung traversal
+func validateSafePath(path string) error {
+	if path == "" {
+		return errors.New("path cannot be empty")
+	}
+	// Clean path dan pastikan tidak mengandung ..
+	clean := filepath.Clean(path)
+	if filepath.IsAbs(clean) {
+		// Untuk absolute path, pastikan dalam working directory
+		wd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		if !filepath.HasPrefix(clean, wd) {
+			return fmt.Errorf("path %s is outside working directory", path)
+		}
+	}
+	return nil
+}
 
 func main() {
 	qr, err := qrcode.New("https://pdf.elemen.id/4gJLEXjYgJXXJtrQuMjysPmFJV5PyJYh", qrcode.Medium)
@@ -31,12 +69,13 @@ func main() {
 	qr.ForegroundColor = color.Black
 	qr.BackgroundColor = color.Transparent
 
-	png, err := qr.PNG(120)
+	pngBytes, err := qr.PNG(120)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	if err := os.WriteFile(tempQR, png, 0o644); err != nil {
+	// Gunakan permission 0o600 untuk file temporary (lebih aman)
+	if err := os.WriteFile(tempQR, pngBytes, 0o600); err != nil {
 		log.Fatal(err)
 	}
 
@@ -58,12 +97,24 @@ func main() {
 }
 
 func addBackgroundToQR(qrPath, logoPath, outPath string) error {
+	// Validasi path untuk keamanan
+	if err := validateSafePath(qrPath); err != nil {
+		return fmt.Errorf("invalid QR path: %w", err)
+	}
+	if err := validateSafePath(logoPath); err != nil {
+		return fmt.Errorf("invalid logo path: %w", err)
+	}
+	if err := validateSafePath(outPath); err != nil {
+		return fmt.Errorf("invalid output path: %w", err)
+	}
+
 	// Open QR File
 	qrFile, err := os.Open(qrPath)
 	if err != nil {
 		return fmt.Errorf("failed to open QR: %w", err)
 	}
 	defer qrFile.Close()
+
 	qrImg, err := png.Decode(qrFile)
 	if err != nil {
 		return fmt.Errorf("failed to decode QR: %w", err)
@@ -75,6 +126,7 @@ func addBackgroundToQR(qrPath, logoPath, outPath string) error {
 		return fmt.Errorf("failed to open logo: %w", err)
 	}
 	defer logoFile.Close()
+
 	logoImg, _, err := image.Decode(logoFile)
 	if err != nil {
 		return fmt.Errorf("failed to decode logo: %w", err)
@@ -106,20 +158,88 @@ func addBackgroundToQR(qrPath, logoPath, outPath string) error {
 	return png.Encode(outFile, outputImg)
 }
 
+// findOptimalFontSize menggunakan binary search untuk performa lebih baik O(log n)
+func findOptimalFontSize(f *opentype.Font, lines []string, maxHeight int) (font.Face, int, int, int, error) {
+	low, high := 4.0, 200.0
+	var bestFace font.Face
+	var lineHeight, totalHeight, maxWidth int
+
+	for low <= high {
+		mid := (low + high) / 2
+
+		tempFace, err := opentype.NewFace(f, &opentype.FaceOptions{
+			Size:    mid,
+			DPI:     72,
+			Hinting: font.HintingFull,
+		})
+		if err != nil {
+			high = mid - 1
+			continue
+		}
+
+		metrics := tempFace.Metrics()
+		ascent := metrics.Ascent.Ceil()
+		descent := metrics.Descent.Ceil()
+		lh := metrics.Height.Ceil()
+		th := (len(lines)-1)*lh + ascent + descent
+
+		if th > maxHeight {
+			// Terlalu besar, turunkan ukuran
+			tempFace.Close()
+			high = mid - 1
+		} else {
+			// Muat, coba ukuran lebih besar
+			if bestFace != nil {
+				bestFace.Close()
+			}
+			bestFace = tempFace
+			lineHeight = lh
+			totalHeight = th
+
+			// Hitung max width
+			mw := 0
+			for _, line := range lines {
+				w := font.MeasureString(bestFace, line).Ceil()
+				if w > mw {
+					mw = w
+				}
+			}
+			maxWidth = mw
+
+			low = mid + 1
+		}
+	}
+
+	if bestFace == nil {
+		return nil, 0, 0, 0, fmt.Errorf("failed to find suitable font size")
+	}
+
+	return bestFace, lineHeight, totalHeight, maxWidth, nil
+}
+
 func addTextToRightSide(qrPath, outPath string) error {
+	// Validasi path untuk keamanan
+	if err := validateSafePath(qrPath); err != nil {
+		return fmt.Errorf("invalid QR path: %w", err)
+	}
+	if err := validateSafePath(outPath); err != nil {
+		return fmt.Errorf("invalid output path: %w", err)
+	}
+
 	qrFile, err := os.Open(qrPath)
 	if err != nil {
 		return fmt.Errorf("failed to open qr: %w", err)
 	}
 	defer qrFile.Close()
+
 	qrImg, err := png.Decode(qrFile)
 	if err != nil {
 		return fmt.Errorf("failed to decode qr: %w", err)
 	}
 	qrBounds := qrImg.Bounds()
 
-	// Parse font
-	f, err := opentype.Parse(goregular.TTF)
+	// Parse font dari cache (hanya sekali selama runtime)
+	f, err := getCachedFont()
 	if err != nil {
 		return fmt.Errorf("failed to parse font: %w", err)
 	}
@@ -131,56 +251,17 @@ func addTextToRightSide(qrPath, outPath string) error {
 		"yang diterbitkan oleh BSrE-BSSN.",
 	}
 
-	var face font.Face
-	var lineHeight, totalHeight, maxWidth int
-
-	// Loop to find the maximum font size that lets the 4 lines fit completely within the QR code's exact height.
-	for s := 4.0; s <= 200.0; s += 1.0 {
-		tempFace, err := opentype.NewFace(f, &opentype.FaceOptions{
-			Size:    s,
-			DPI:     72,
-			Hinting: font.HintingFull,
-		})
-		if err != nil {
-			continue
-		}
-
-		metrics := tempFace.Metrics()
-		ascent := metrics.Ascent.Ceil()
-		descent := metrics.Descent.Ceil()
-		lh := metrics.Height.Ceil()
-		th := (len(lines)-1)*lh + ascent + descent
-
-		if th > qrBounds.Dy() {
-			tempFace.Close()
-			break
-		}
-		if face != nil {
-			face.Close()
-		}
-		face = tempFace
-		lineHeight = lh
-		totalHeight = th
-
-		mw := 0
-		for _, line := range lines {
-			w := font.MeasureString(face, line).Ceil()
-			if w > mw {
-				mw = w
-			}
-		}
-		maxWidth = mw
-	}
-
-	if face == nil {
-		return fmt.Errorf("failed to find suitable font size")
+	// Gunakan binary search untuk mencari ukuran font optimal
+	face, lineHeight, totalHeight, maxWidth, err := findOptimalFontSize(f, lines, qrBounds.Dy())
+	if err != nil {
+		return err
 	}
 	defer face.Close()
 
 	// Colors
 	textColor := color.RGBA{48, 134, 198, 255} // Blue matching the BSrE logo
 
-	spacing := int(float64(qrBounds.Dx()) * 0.08) // Spacing relative to QR size (approx 25px for 300px QR = ~10px for 120px QR)
+	spacing := int(float64(qrBounds.Dx()) * 0.08)
 	outWidth := qrBounds.Dx() + spacing + maxWidth
 	outHeight := qrBounds.Dy()
 
